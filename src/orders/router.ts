@@ -1,6 +1,6 @@
 import { Request, Router } from 'express';
 import { asyncHandler } from '../asyncHandler';
-import { notFound } from '../errors';
+import { badRequest, notFound } from '../errors';
 import { currentUser, requireAuth, requireStaff } from '../middleware/auth';
 import { parseId } from '../validation';
 import * as service from './service';
@@ -13,11 +13,25 @@ function orderId(req: Request): number {
   return id;
 }
 
+/**
+ * Optional `discountCode` in the checkout body. A missing or non-object body, or a missing/null
+ * field, means no code, so checkout without a code behaves exactly as before.
+ */
+function discountCodeField(req: Request): string | undefined {
+  const body = req.body as unknown;
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const value = (body as Record<string, unknown>).discountCode;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || value.trim() === '') throw badRequest('discountCode must be a non-empty string');
+  return value.trim();
+}
+
 ordersRouter.post(
   '/checkout',
   requireAuth,
   asyncHandler(async (req, res) => {
-    res.status(201).json({ order: await service.checkout(currentUser(req).id) });
+    const order = await service.checkout(currentUser(req).id, { discountCode: discountCodeField(req) });
+    res.status(201).json({ order });
   }),
 );
 

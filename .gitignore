@@ -1,3 +1,13 @@
 node_modules/
 dist/
 .env
+
+# CodeValid — auto-added
+build/
+coverage/
+.next/
+out/
+.turbo/
+__pycache__/
+.pytest_cache/
+.venv/

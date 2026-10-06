@@ -1,5 +1,6 @@
 import { PoolClient } from 'pg';
 import { pool, withTransaction } from '../db';
+import { applyAtCheckout, AppliedDiscount } from '../discounts/service';
 import { badRequest, conflict, notFound } from '../errors';
 
 export const FREE_SHIPPING_THRESHOLD_CENTS = 5000;
@@ -21,6 +22,8 @@ export interface Order {
   status: OrderStatus;
   items: OrderItem[];
   subtotalCents: number;
+  discountCode: string | null;
+  discountCents: number;
   shippingCents: number;
   totalCents: number;
   createdAt: string;
@@ -32,6 +35,8 @@ interface OrderRow {
   user_id: number;
   status: OrderStatus;
   subtotal_cents: number;
+  discount_code: string | null;
+  discount_cents: number;
   shipping_cents: number;
   total_cents: number;
   created_at: Date;
@@ -47,7 +52,8 @@ interface ItemRow {
   line_total_cents: number;
 }
 
-const ORDER_COLUMNS = 'id, user_id, status, subtotal_cents, shipping_cents, total_cents, created_at, updated_at';
+const ORDER_COLUMNS =
+  'id, user_id, status, subtotal_cents, discount_code, discount_cents, shipping_cents, total_cents, created_at, updated_at';
 
 export function shippingFor(subtotalCents: number): number {
   return subtotalCents >= FREE_SHIPPING_THRESHOLD_CENTS ? 0 : SHIPPING_FEE_CENTS;
@@ -78,6 +84,8 @@ async function loadOrders(db: PoolClient | typeof pool, rows: OrderRow[]): Promi
     status: r.status,
     items: byOrder.get(r.id) ?? [],
     subtotalCents: r.subtotal_cents,
+    discountCode: r.discount_code,
+    discountCents: r.discount_cents,
     shippingCents: r.shipping_cents,
     totalCents: r.total_cents,
     createdAt: r.created_at.toISOString(),
@@ -85,11 +93,20 @@ async function loadOrders(db: PoolClient | typeof pool, rows: OrderRow[]): Promi
   }));
 }
 
+export interface CheckoutOptions {
+  /** Discount code as typed by the shopper; matched ignoring case. */
+  discountCode?: string;
+}
+
 /**
  * Turns the user's cart into an order in one transaction: stock is re-checked under row locks,
- * decremented, the order is written and the cart is emptied. Any failure rolls everything back.
+ * the optional discount code is validated, stock is decremented, the order is written and the cart
+ * is emptied. Any failure (including a refused code) rolls everything back.
+ *
+ * Totals: discount comes off the cart subtotal (never below zero); shipping is decided on the
+ * discounted subtotal; total = subtotal - discount + shipping.
  */
-export async function checkout(userId: number): Promise<Order> {
+export async function checkout(userId: number, opts: CheckoutOptions = {}): Promise<Order> {
   return withTransaction(async (client) => {
     const cart = await client.query<{ product_id: number; quantity: number }>(
       'SELECT product_id, quantity FROM cart_items WHERE user_id = $1 ORDER BY product_id FOR UPDATE',
@@ -123,13 +140,28 @@ export async function checkout(userId: number): Promise<Order> {
       subtotal += lineTotal;
       return { productId: p.id, name: p.name, unitPrice: p.price_cents, quantity: line.quantity, lineTotal };
     });
-    const shipping = shippingFor(subtotal);
+    const discount: AppliedDiscount | null =
+      opts.discountCode !== undefined ? await applyAtCheckout(client, userId, opts.discountCode, subtotal) : null;
+    const discountCents = discount ? discount.discountCents : 0;
+    const discountedSubtotal = subtotal - discountCents;
+    const shipping = shippingFor(discountedSubtotal);
+    const total = discountedSubtotal + shipping;
 
-    const order = await client.query<OrderRow>(
-      `INSERT INTO orders (user_id, status, subtotal_cents, shipping_cents, total_cents)
-       VALUES ($1, 'placed', $2, $3, $4) RETURNING ${ORDER_COLUMNS}`,
-      [userId, subtotal, shipping, subtotal + shipping],
-    );
+    let order;
+    try {
+      order = await client.query<OrderRow>(
+        `INSERT INTO orders (user_id, status, subtotal_cents, discount_code_id, discount_code, discount_cents,
+                             shipping_cents, total_cents)
+         VALUES ($1, 'placed', $2, $3, $4, $5, $6, $7) RETURNING ${ORDER_COLUMNS}`,
+        [userId, subtotal, discount?.id ?? null, discount?.code ?? null, discountCents, shipping, total],
+      );
+    } catch (err) {
+      // orders_user_discount_code_idx: a concurrent checkout by the same shopper took the code first.
+      if (discount && (err as { code?: string }).code === '23505') {
+        throw conflict(`discount code ${discount.code} has already been used on another order`);
+      }
+      throw err;
+    }
     const orderId = order.rows[0].id;
 
     for (const it of items) {
@@ -168,7 +200,10 @@ export async function getForUser(userId: number, orderId: number): Promise<Order
   return order;
 }
 
-/** Cancels one of the user's own orders while it is still placed, returning its stock. */
+/**
+ * Cancels one of the user's own orders while it is still placed, returning its stock. A discount
+ * code on the order is freed for this shopper again (usage only counts non-cancelled orders).
+ */
 export async function cancel(userId: number, orderId: number): Promise<Order> {
   return withTransaction(async (client) => {
     const { rows } = await client.query<OrderRow>(

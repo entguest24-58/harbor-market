@@ -2,6 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import { authRouter } from './auth/router';
 import { cartRouter } from './cart/router';
 import { pool } from './db';
+import { discountsRouter } from './discounts/router';
 import { HttpError } from './errors';
 import { ordersRouter } from './orders/router';
 import { productsRouter } from './products/router';
@@ -24,6 +25,7 @@ export function createApp() {
   app.use('/products', productsRouter);
   app.use('/cart', cartRouter);
   app.use('/orders', ordersRouter);
+  app.use('/discount-codes', discountsRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ error: 'not found' });

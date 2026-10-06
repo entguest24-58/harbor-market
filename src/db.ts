@@ -25,9 +25,12 @@ export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>)
   }
 }
 
-const REQUIRED_TABLES = ['users', 'products', 'cart_items', 'orders', 'order_items'];
+const REQUIRED_TABLES = ['users', 'products', 'cart_items', 'orders', 'order_items', 'discount_codes'];
 
-/** Applies db/schema.sql when any of the application tables is missing. */
+/**
+ * Applies db/schema.sql when any of the application tables is missing. The file is idempotent
+ * (IF NOT EXISTS throughout), so an existing database picks up newly added tables and columns.
+ */
 export async function ensureSchema(): Promise<void> {
   const { rows } = await pool.query<{ table_name: string }>(
     `SELECT table_name FROM information_schema.tables

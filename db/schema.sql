@@ -52,3 +52,28 @@ CREATE TABLE IF NOT EXISTS order_items (
   line_total_cents INTEGER NOT NULL CHECK (line_total_cents > 0),
   PRIMARY KEY (order_id, product_id)
 );
+
+-- Discount codes. Shoppers type `code`; it is matched ignoring case.
+-- percentage: value is whole percent off the subtotal (1-50); fixed: value is cents off the subtotal.
+CREATE TABLE IF NOT EXISTS discount_codes (
+  id                 SERIAL PRIMARY KEY,
+  code               TEXT NOT NULL CHECK (code ~ '^[A-Za-z0-9]{1,20}$'),
+  type               TEXT NOT NULL CHECK (type IN ('percentage', 'fixed')),
+  value              INTEGER NOT NULL CHECK (value > 0 AND (type <> 'percentage' OR value <= 50)),
+  min_subtotal_cents INTEGER NOT NULL DEFAULT 0 CHECK (min_subtotal_cents >= 0),
+  expires_at         TIMESTAMPTZ,
+  active             BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS discount_codes_code_lower_idx ON discount_codes (lower(code));
+
+-- Discount applied to an order. subtotal_cents stays the pre-discount cart subtotal;
+-- total_cents = subtotal_cents - discount_cents + shipping_cents.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_code_id INTEGER REFERENCES discount_codes(id);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_code TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_cents INTEGER NOT NULL DEFAULT 0 CHECK (discount_cents >= 0);
+
+-- A shopper may use a code once; a cancelled order frees it again.
+CREATE UNIQUE INDEX IF NOT EXISTS orders_user_discount_code_idx ON orders (user_id, discount_code_id)
+  WHERE discount_code_id IS NOT NULL AND status <> 'cancelled';
